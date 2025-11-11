@@ -1873,7 +1873,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
           st->nonPawnMaterial[us] += PieceValue[MG][pc];
       update_choice_group_usage(us, dropType);
       if (refresh_setup_state(us))
-          discard_choice_group_reserve(us, k, Eval::useNNUE ? &dp : nullptr);
+          discard_choice_group_reserve(us, k, Eval::NNUE::useNNUE == Eval::NNUE::UseNNUEMode::True ? &dp : nullptr);
       // Set castling rights for dropped king or rook
       if (castling_dropped_piece() && rank_of(to) == castling_rank(us))
       {
