@@ -542,11 +542,97 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
   chess960 = isChess960 || v->chess960;
   tsumeMode = Options["TsumeMode"];
   thisThread = th;
+  if (var->setupDrops)
+      for (Color c : {WHITE, BLACK})
+          st->setupDropsActive[c] = setup_drop_pending(c);
   set_state(st);
 
   assert(pos_is_ok());
 
   return *this;
+}
+
+bool Position::setup_drop_pending(Color c) const {
+  if (!var->setupDrops)
+      return false;
+
+  for (PieceSet ps = var->setupDropPieceTypes[c]; ps;)
+  {
+      PieceType pt = pop_lsb(ps);
+      if (count_in_hand(c, pt) > 0)
+          return true;
+  }
+
+  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
+  {
+      const PieceChoiceGroup& group = var->pieceChoiceGroups[c][i];
+      if (!group.requiredForSetup || st->choiceGroupUsage[c][i] >= group.limit)
+          continue;
+      for (PieceSet options = group.options; options;)
+      {
+          PieceType pt = pop_lsb(options);
+          if (count_in_hand(c, pt) > 0)
+              return true;
+      }
+  }
+
+  return false;
+}
+
+bool Position::refresh_setup_state(Color c) {
+  if (!var->setupDrops)
+      return false;
+  bool wasActive = st->setupDropsActive[c];
+  bool nowActive = setup_drop_pending(c);
+  st->setupDropsActive[c] = nowActive;
+  return wasActive && !nowActive;
+}
+
+void Position::update_choice_group_usage(Color c, PieceType pt) {
+  if (!var->pieceChoiceGroupCount[c])
+      return;
+  PieceSet mask = piece_set(pt);
+  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
+  {
+      if (!(var->pieceChoiceGroups[c][i].options & mask))
+          continue;
+      int limit = var->pieceChoiceGroups[c][i].limit;
+      int& usage = st->choiceGroupUsage[c][i];
+      usage += 1;
+      if (limit && usage > limit)
+          usage = limit;
+  }
+}
+
+void Position::discard_choice_group_reserve(Color c, Key& keyUpdater, DirtyPiece* dp) {
+  if (!var->pieceChoiceGroupCount[c])
+      return;
+  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
+  {
+      const PieceChoiceGroup& group = var->pieceChoiceGroups[c][i];
+      if (!group.requiredForSetup || st->choiceGroupUsage[c][i] < group.limit)
+          continue;
+      for (PieceSet options = group.options; options;)
+      {
+          PieceType pt = pop_lsb(options);
+          while (pieceCountInHand[c][pt] > 0)
+          {
+              Piece pc = make_piece(c, pt);
+              keyUpdater ^= Zobrist::inHand[pc][pieceCountInHand[c][pt]];
+              keyUpdater ^= Zobrist::inHand[pc][pieceCountInHand[c][pt] - 1];
+              remove_from_hand(pc);
+              if (dp)
+              {
+                  dp->piece[dp->dirty_num] = NO_PIECE;
+                  dp->handPiece[dp->dirty_num] = pc;
+                  dp->handCount[dp->dirty_num] = pieceCountInHand[c][pt];
+                  dp->from[dp->dirty_num] = SQ_NONE;
+                  dp->to[dp->dirty_num] = SQ_NONE;
+                  ++dp->dirty_num;
+              }
+          }
+      }
+  }
 }
 
 
@@ -1067,11 +1153,21 @@ bool Position::legal(Move m) const {
       return false;
 
   // Illegal non-drop moves
-  if (must_drop() && count_in_hand(us, var->mustDropType) > 0)
+  bool enforceDrop = false;
+  PieceType requiredDropType = var->mustDropType;
+  if (var->mustDrop && count_in_hand(us, var->mustDropType) > 0)
+      enforceDrop = true;
+  if (setup_drops_active(us) && var->setupMustDrop)
+  {
+      enforceDrop = true;
+      requiredDropType = ALL_PIECES;
+  }
+
+  if (enforceDrop)
   {
       if (type_of(m) == DROP)
       {
-          if (var->mustDropType != ALL_PIECES && var->mustDropType != in_hand_piece_type(m))
+          if (requiredDropType != ALL_PIECES && requiredDropType != in_hand_piece_type(m))
               return false;
       }
       else if (checkers())
@@ -1770,10 +1866,14 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
           dp.to[0] = to;
       }
 
-      drop_piece(make_piece(us, in_hand_piece_type(m)), pc, to);
+      PieceType dropType = in_hand_piece_type(m);
+      drop_piece(make_piece(us, dropType), pc, to);
       st->materialKey ^= Zobrist::psq[pc][pieceCount[pc]-1];
       if (type_of(pc) != PAWN)
           st->nonPawnMaterial[us] += PieceValue[MG][pc];
+      update_choice_group_usage(us, dropType);
+      if (refresh_setup_state(us))
+          discard_choice_group_reserve(us, k, Eval::useNNUE ? &dp : nullptr);
       // Set castling rights for dropped king or rook
       if (castling_dropped_piece() && rank_of(to) == castling_rank(us))
       {

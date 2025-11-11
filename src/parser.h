@@ -52,6 +52,7 @@ private:
     Config config;
     template <bool Current = true, class T> bool parse_attribute(const std::string& key, T& target);
     template <bool Current = true, class T> bool parse_attribute(const std::string& key, T& target, std::string pieceToChar);
+    void parse_piece_choice_groups(const std::string& key, Variant* v, bool bothColors = false, Color color = WHITE);
 };
 
 } // namespace Stockfish

@@ -18,6 +18,8 @@
 
 #include <string>
 #include <sstream>
+#include <vector>
+#include <cctype>
 
 #include "apiutil.h"
 #include "parser.h"
@@ -238,6 +240,93 @@ template <bool Current, class T> bool VariantParser<DoCheck>::parse_attribute(co
 }
 
 template <bool DoCheck>
+void VariantParser<DoCheck>::parse_piece_choice_groups(const std::string& key, Variant* v, bool bothColors, Color color) {
+    const auto& it = config.find(key);
+    if (it == config.end())
+        return;
+
+    std::stringstream groupStream(it->second);
+    std::string groupEntry;
+    std::vector<PieceChoiceGroup> parsedGroups;
+    while (std::getline(groupStream, groupEntry, ';'))
+    {
+        if (groupEntry.empty())
+            continue;
+
+        PieceChoiceGroup group;
+        std::stringstream tokenStream(groupEntry);
+        std::string token;
+        while (tokenStream >> token)
+        {
+            auto pos = token.find('=');
+            if (pos == std::string::npos)
+                continue;
+            std::string option = token.substr(0, pos);
+            std::string value = token.substr(pos + 1);
+
+            if (option == "options")
+            {
+                PieceSet parsed = NO_PIECE_SET;
+                for (char ch : value)
+                {
+                    if (isspace(static_cast<unsigned char>(ch)))
+                        continue;
+                    size_t idx = ch == '*' ? size_t(ALL_PIECES) : v->pieceToChar.find(toupper(ch));
+                    if (idx == std::string::npos)
+                    {
+                        parsed = NO_PIECE_SET;
+                        break;
+                    }
+                    parsed |= PieceType(idx);
+                }
+                group.options = parsed;
+            }
+            else if (option == "limit")
+            {
+                std::stringstream limitStream(value);
+                limitStream >> group.limit;
+            }
+            else if (option == "required" || option == "requiredForSetup")
+                group.requiredForSetup = (value == "true" || value == "1");
+        }
+
+        if (group.options == NO_PIECE_SET || group.limit <= 0)
+        {
+            if (DoCheck)
+                std::cerr << key << " - Invalid pieceChoiceGroup entry: " << groupEntry << std::endl;
+            continue;
+        }
+
+        parsedGroups.push_back(group);
+    }
+
+    if (parsedGroups.empty())
+        return;
+
+    auto applyGroups = [&](Color target) {
+        for (const auto& group : parsedGroups)
+        {
+            if (v->pieceChoiceGroupCount[target] >= PieceChoiceGroupMax)
+            {
+                if (DoCheck)
+                    std::cerr << key << " - Maximum number of piece choice groups exceeded." << std::endl;
+                break;
+            }
+            v->pieceChoiceGroups[target][v->pieceChoiceGroupCount[target]] = group;
+            ++v->pieceChoiceGroupCount[target];
+        }
+    };
+
+    if (bothColors)
+    {
+        applyGroups(WHITE);
+        applyGroups(BLACK);
+    }
+    else
+        applyGroups(color);
+}
+
+template <bool DoCheck>
 Variant* VariantParser<DoCheck>::parse() {
     Variant* v = new Variant();
     v->reset_pieces();
@@ -347,6 +436,17 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
     parse_attribute<false>("castlingRookPiece", v->castlingRookPieces[BLACK], v->pieceToChar);
     parse_attribute<false>("whiteDropRegion", v->dropRegion[WHITE]);
     parse_attribute<false>("blackDropRegion", v->dropRegion[BLACK]);
+    parse_attribute("setupDrops", v->setupDrops);
+    parse_attribute("setupMustDrop", v->setupMustDrop);
+    parse_attribute("setupDropRegionWhite", v->setupDropRegion[WHITE]);
+    parse_attribute("setupDropRegionBlack", v->setupDropRegion[BLACK]);
+    parse_attribute("setupDropPieceTypes", v->setupDropPieceTypes[WHITE], v->pieceToChar);
+    parse_attribute("setupDropPieceTypes", v->setupDropPieceTypes[BLACK], v->pieceToChar);
+    parse_attribute("setupDropPieceTypesWhite", v->setupDropPieceTypes[WHITE], v->pieceToChar);
+    parse_attribute("setupDropPieceTypesBlack", v->setupDropPieceTypes[BLACK], v->pieceToChar);
+    parse_piece_choice_groups("pieceChoiceGroup", v, true);
+    parse_piece_choice_groups("pieceChoiceGroupWhite", v, false, WHITE);
+    parse_piece_choice_groups("pieceChoiceGroupBlack", v, false, BLACK);
 
     bool dropOnTop = false;
     parse_attribute<false>("dropOnTop", dropOnTop);

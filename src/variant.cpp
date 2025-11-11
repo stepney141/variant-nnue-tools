@@ -1228,6 +1228,35 @@ namespace {
         v->flyingGeneral = true;
         return v;
     }
+
+    // 66 Shogi (Roku-roku Shogi)
+    // minishogi variant with staged placement and rook/bishop choice
+    // http://www.tendocci.com/66shogi/
+    // http://minerva.cs.uec.ac.jp/cgi-bin/uec55shogi/wiki.cgi?page=%A3%B6%A3%B6%BE%AD%B4%FD
+    Variant* rokuroku_shogi_variant() {
+        Variant* v = minishogi_variant_base()->init();
+        v->maxRank = RANK_6;
+        v->maxFile = FILE_F;
+        v->pocketSize = 7;
+        v->add_piece(LANCE, 'l');
+        v->add_piece(SHOGI_KNIGHT, 'n');
+        v->startFen = "6/pppppp/6/6/PPPPPP/6[KGSNLRBkgsnlrb] w - - 0 1";
+        v->promotionRegion[WHITE] = Rank5BB | Rank6BB;
+        v->promotionRegion[BLACK] = Rank1BB | Rank2BB;
+        v->setupDrops = true;
+        v->setupMustDrop = true;
+        v->setupDropRegion[WHITE] = Rank1BB;
+        v->setupDropRegion[BLACK] = Rank6BB;
+        v->setupDropPieceTypes[WHITE] = piece_set(KING) | GOLD | SILVER | SHOGI_KNIGHT | LANCE;
+        v->setupDropPieceTypes[BLACK] = piece_set(KING) | GOLD | SILVER | SHOGI_KNIGHT | LANCE;
+        v->pieceChoiceGroupCount[WHITE] = 1;
+        v->pieceChoiceGroupCount[BLACK] = 1;
+        v->pieceChoiceGroups[WHITE][0] = {piece_set(ROOK) | BISHOP, 1, true};
+        v->pieceChoiceGroups[BLACK][0] = {piece_set(ROOK) | BISHOP, 1, true};
+        v->nnueAlias = "66shogi";
+        return v;
+    }
+
 #ifdef LARGEBOARDS
     // Shogi (Japanese chess)
     // https://en.wikipedia.org/wiki/Shogi
@@ -1244,6 +1273,7 @@ namespace {
         v->promotedPieceType[SHOGI_KNIGHT] = GOLD;
         return v;
     }
+
     // Check-Shogi
     // Shogi variant with check counting enabled
     Variant* checkshogi_variant() {
@@ -1899,6 +1929,7 @@ void VariantMap::init() {
     add("judkins", judkinsshogi_variant());
     add("torishogi", torishogi_variant());
     add("euroshogi", euroshogi_variant());
+    // add("66shogi", rokuroku_shogi_variant());
     add("losalamos", losalamos_variant());
     add("gardner", gardner_variant());
     add("almost", almost_variant());

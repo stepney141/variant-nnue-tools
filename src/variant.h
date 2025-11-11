@@ -33,6 +33,14 @@
 
 namespace Stockfish {
 
+constexpr int PieceChoiceGroupMax = 8;
+
+struct PieceChoiceGroup {
+  PieceSet options = NO_PIECE_SET;
+  int limit = 0;
+  bool requiredForSetup = false;
+};
+
 /// Variant struct stores information needed to determine the rules of a variant.
 
 struct Variant {
@@ -104,6 +112,12 @@ struct Variant {
   PieceType dropNoDoubled = NO_PIECE_TYPE;
   int dropNoDoubledCount = 1;
   bool immobilityIllegal = false;
+  bool setupDrops = false;
+  bool setupMustDrop = false;
+  Bitboard setupDropRegion[COLOR_NB] = {AllSquares, AllSquares};
+  PieceSet setupDropPieceTypes[COLOR_NB] = {NO_PIECE_SET, NO_PIECE_SET};
+  PieceChoiceGroup pieceChoiceGroups[COLOR_NB][PieceChoiceGroupMax];
+  int pieceChoiceGroupCount[COLOR_NB] = {};
   bool gating = false;
   WallingRule wallingRule = NO_WALLING;
   Bitboard wallingRegion[COLOR_NB] = {AllSquares, AllSquares};
@@ -224,6 +238,16 @@ struct Variant {
   Variant* init() {
       nnueAlias = "";
       endgameEval = EG_EVAL_CHESS;
+      setupDrops = false;
+      setupMustDrop = false;
+      for (Color c : {WHITE, BLACK})
+      {
+          setupDropRegion[c] = AllSquares;
+          setupDropPieceTypes[c] = NO_PIECE_SET;
+          pieceChoiceGroupCount[c] = 0;
+          for (int i = 0; i < PieceChoiceGroupMax; ++i)
+              pieceChoiceGroups[c][i] = PieceChoiceGroup();
+      }
       return this;
   }
 

@@ -59,6 +59,8 @@ struct StateInfo {
   Square castlingKingSquare[COLOR_NB];
   Bitboard wallSquares;
   Bitboard gatesBB[COLOR_NB];
+  bool setupDropsActive[COLOR_NB];
+  int choiceGroupUsage[COLOR_NB][PieceChoiceGroupMax];
 
   // Not copied when making a move (will be recomputed anyhow)
   Key        key;
@@ -176,6 +178,7 @@ public:
   bool drop_loop() const;
   bool captures_to_hand() const;
   bool first_rank_pawn_drops() const;
+  bool setup_drops_active(Color c) const;
   bool can_drop(Color c, PieceType pt) const;
   EnclosingRule enclosing_drop() const;
   Bitboard drop_region(Color c) const;
@@ -385,6 +388,11 @@ private:
   void move_piece(Square from, Square to);
   template<bool Do>
   void do_castling(Color us, Square from, Square& to, Square& rfrom, Square& rto);
+  bool setup_drop_pending(Color c) const;
+  bool refresh_setup_state(Color c);
+  void update_choice_group_usage(Color c, PieceType pt);
+  void discard_choice_group_reserve(Color c, Key& keyUpdater, DirtyPiece* dp);
+  bool choice_group_allows_drop(Color c, PieceType pt) const;
 
   // Data members
   Piece board[SQUARE_NB];
@@ -695,6 +703,8 @@ inline bool Position::has_capture() const {
 
 inline bool Position::must_drop() const {
   assert(var != nullptr);
+  if (setup_drops_active(sideToMove) && var->setupMustDrop)
+      return true;
   return var->mustDrop;
 }
 
@@ -718,6 +728,11 @@ inline bool Position::first_rank_pawn_drops() const {
   return var->firstRankPawnDrops;
 }
 
+inline bool Position::setup_drops_active(Color c) const {
+  assert(var != nullptr);
+  return var->setupDrops && st->setupDropsActive[c];
+}
+
 inline EnclosingRule Position::enclosing_drop() const {
   assert(var != nullptr);
   return var->enclosingDrop;
@@ -725,7 +740,7 @@ inline EnclosingRule Position::enclosing_drop() const {
 
 inline Bitboard Position::drop_region(Color c) const {
   assert(var != nullptr);
-  return var->dropRegion[c];
+  return setup_drops_active(c) ? var->setupDropRegion[c] : var->dropRegion[c];
 }
 
 inline Bitboard Position::drop_region(Color c, PieceType pt) const {
@@ -1674,7 +1689,22 @@ inline void Position::undrop_piece(Piece pc_hand, Square s) {
 }
 
 inline bool Position::can_drop(Color c, PieceType pt) const {
-  return variant()->freeDrops || count_in_hand(c, pt) > 0;
+  return variant()->freeDrops || (choice_group_allows_drop(c, pt) && count_in_hand(c, pt) > 0);
+}
+
+inline bool Position::choice_group_allows_drop(Color c, PieceType pt) const {
+  assert(var != nullptr);
+  if (!var->pieceChoiceGroupCount[c])
+      return true;
+  PieceSet mask = piece_set(pt);
+  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
+      if (var->pieceChoiceGroups[c][i].options & mask)
+      {
+          bool restrict = !(var->pieceChoiceGroups[c][i].requiredForSetup && !setup_drops_active(c));
+          if (restrict && st->choiceGroupUsage[c][i] >= var->pieceChoiceGroups[c][i].limit)
+              return false;
+      }
+  return true;
 }
 
 } // namespace Stockfish

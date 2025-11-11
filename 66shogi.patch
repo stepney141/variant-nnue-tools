@@ -1,0 +1,573 @@
+diff --git a/66shogi.md b/66shogi.md
+new file mode 100644
+index 00000000..852a8095
+--- /dev/null
++++ b/66shogi.md
+@@ -0,0 +1,65 @@
++## 66shogi Implementation Notes
++
++### Objectives
++- Provide engine-level support for the staged placement sequence unique to 66shogi without breaking existing shogi-style variants.
++- Enforce the "either rook or bishop" rule mechanically so that users don’t have to self-police their setup.
++- Keep the configuration surface variant-driven: everything should be expressible from `variants.ini` rather than hardcoding behavior in the search logic.
++
++### Key Design Decisions
++1. **Generic Setup Phase Hooks**
++   - Added `setupDrops`, `setupMustDrop`, per-color `setupDropRegion`, and `setupDropPieceTypes` to `Variant`. This lets any variant specify a temporary drop-only phase, its valid squares, and which pockets are mandatory before regular play begins.
++   - `StateInfo` now tracks `setupDropsActive` so legality checks can force drops only during the setup window, avoiding conflicts with normal shogi drops after the phase ends.
++
++2. **Piece Choice Groups**
++   - Introduced `PieceChoiceGroup` arrays in `Variant` and parser support for `pieceChoiceGroup*` keys. Each group defines a piece set, a maximum count, and whether it applies only during setup.
++   - During setup, move generation consults the relevant group to ensure that, for example, dropping a rook consumes the shared quota and prevents a subsequent bishop drop (and vice versa).
++
++3. **Automatic Cleanup After Setup**
++   - Once all required drops are performed, any leftover pocket pieces belonging to fulfilled choice groups are removed so later captures don’t resurrect the unused option.
++   - NNUE dirty-piece bookkeeping was extended so that these implicit removals keep the accumulator in sync.
++
++4. **Variant Definition**
++   - Added `sixty_six_shogi_variant()` in `src/variant.cpp` and a matching `[66shogi:shogi]` section in `variants.ini` that leverage the new knobs: 6×6 board, custom start FEN with pockets, setup drop regions (rank 1 for White, rank 6 for Black), and `pieceChoiceGroup = options=rb limit=1 required=true`.
++
++### File Touchpoints
++- `src/variant.h / src/variant.cpp`: new struct members, helpers, and the concrete 66shogi variant.
++- `src/parser.h / src/parser.cpp`: parsing logic for setup fields and piece-choice groups.
++- `src/position.h / src/position.cpp`: enforcement of setup-phase drops, choice-group accounting, and automatic cleanup.
++- `src/variants.ini`: declarative definition of the 66shogi ruleset using the newly introduced options.
++
++### Result
++The engine can now run 66shogi end-to-end: players alternate forced drops on their home ranks, must choose exactly one of rook/bishop, and transition seamlessly into standard shogi play once all six pieces are deployed. The infrastructure is generic enough for future placement-based variants.
++
++---
++
++## 66shogi 実装メモ（日本語）
++
++### 目的
++- 66shogi 固有の段階的配置シーケンスを既存の将棋系バリアントを壊さずにエンジンレベルでサポートする。
++- 「飛車または角のどちらか一方のみ」を機械的に強制し、ユーザーが自分でルールを守らなくても済むようにする。
++- 設定項目はすべて `variants.ini` で表現できるようにし、探索ロジックに特別な分岐を埋め込まない。
++
++### 主な設計判断
++1. **汎用的なセットアップフェーズ用フック**
++   - `Variant` に `setupDrops`, `setupMustDrop`, 色別の `setupDropRegion`, `setupDropPieceTypes` を追加し、一時的なドロップ専用フェーズ・有効マス・必須ポケットをバリアントごとに定義できるようにした。
++   - `StateInfo` で `setupDropsActive` を追跡し、初期配置中のみドロップを強制してフェーズ終了後の通常の将棋ドロップと競合しないようにした。
++
++2. **ピース選択グループ**
++   - `Variant` に `PieceChoiceGroup` 配列を設け、`pieceChoiceGroup*` キーをパーサで解釈。各グループは対象駒集合・上限数・セットアップ限定かどうかを持つ。
++   - セットアップ中の指し手生成では該当グループを参照し、例えば飛車を置いたら共有枠を消費して角のドロップを禁止する。
++
++3. **セットアップ完了後の自動クリーンアップ**
++   - 必要なドロップを終えた時点で、満たされた選択グループに属する残りのポケット駒を除去し、後続の捕獲で未使用駒が復活しないようにした。
++   - 暗黙的なポケット除去でも NNUE の蓄積がずれないよう、ダーティーピース情報を拡張した。
++
++4. **バリアント定義**
++   - `src/variant.cpp` に `sixty_six_shogi_variant()` を追加し、`variants.ini` の `[66shogi:shogi]` セクションで新オプションを利用。6×6 盤、ポケット付き初期 FEN、先手段 1・後手段 6 のセットアップ領域、`pieceChoiceGroup = options=rb limit=1 required=true` などを設定している。
++
++### 変更ファイル
++- `src/variant.h / src/variant.cpp`: 新しい構造体メンバー、ヘルパー、66shogi バリアント実装。
++- `src/parser.h / src/parser.cpp`: セットアップ系フィールドとピース選択グループのパース処理。
++- `src/position.h / src/position.cpp`: セットアップドロップの強制、グループ使用状況の管理、自動クリーンアップ。
++- `src/variants.ini`: 追加オプションを使った 66shogi ルールの宣言。
++
++### 結果
++エンジンは 66shogi を開始から終局まで処理でき、プレイヤーは自陣段への強制ドロップを交互に行い、飛車か角を必ず一方だけ配置し、6 駒の配置完了後に通常の将棋フェーズへシームレスに移行できる。構築した仕組みは、今後の配置型バリアントにも流用可能。
+diff --git a/src/parser.cpp b/src/parser.cpp
+index cbd24046..3e42638a 100644
+--- a/src/parser.cpp
++++ b/src/parser.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include <string>
+ #include <sstream>
++#include <vector>
++#include <cctype>
+ 
+ #include "apiutil.h"
+ #include "parser.h"
+@@ -237,6 +239,93 @@ template <bool Current, class T> bool VariantParser<DoCheck>::parse_attribute(co
+     return false;
+ }
+ 
++template <bool DoCheck>
++void VariantParser<DoCheck>::parse_piece_choice_groups(const std::string& key, Variant* v, bool bothColors, Color color) {
++    const auto& it = config.find(key);
++    if (it == config.end())
++        return;
++
++    std::stringstream groupStream(it->second);
++    std::string groupEntry;
++    std::vector<PieceChoiceGroup> parsedGroups;
++    while (std::getline(groupStream, groupEntry, ';'))
++    {
++        if (groupEntry.empty())
++            continue;
++
++        PieceChoiceGroup group;
++        std::stringstream tokenStream(groupEntry);
++        std::string token;
++        while (tokenStream >> token)
++        {
++            auto pos = token.find('=');
++            if (pos == std::string::npos)
++                continue;
++            std::string option = token.substr(0, pos);
++            std::string value = token.substr(pos + 1);
++
++            if (option == "options")
++            {
++                PieceSet parsed = NO_PIECE_SET;
++                for (char ch : value)
++                {
++                    if (isspace(static_cast<unsigned char>(ch)))
++                        continue;
++                    size_t idx = ch == '*' ? size_t(ALL_PIECES) : v->pieceToChar.find(toupper(ch));
++                    if (idx == std::string::npos)
++                    {
++                        parsed = NO_PIECE_SET;
++                        break;
++                    }
++                    parsed |= PieceType(idx);
++                }
++                group.options = parsed;
++            }
++            else if (option == "limit")
++            {
++                std::stringstream limitStream(value);
++                limitStream >> group.limit;
++            }
++            else if (option == "required" || option == "requiredForSetup")
++                group.requiredForSetup = (value == "true" || value == "1");
++        }
++
++        if (group.options == NO_PIECE_SET || group.limit <= 0)
++        {
++            if (DoCheck)
++                std::cerr << key << " - Invalid pieceChoiceGroup entry: " << groupEntry << std::endl;
++            continue;
++        }
++
++        parsedGroups.push_back(group);
++    }
++
++    if (parsedGroups.empty())
++        return;
++
++    auto applyGroups = [&](Color target) {
++        for (const auto& group : parsedGroups)
++        {
++            if (v->pieceChoiceGroupCount[target] >= PieceChoiceGroupMax)
++            {
++                if (DoCheck)
++                    std::cerr << key << " - Maximum number of piece choice groups exceeded." << std::endl;
++                break;
++            }
++            v->pieceChoiceGroups[target][v->pieceChoiceGroupCount[target]] = group;
++            ++v->pieceChoiceGroupCount[target];
++        }
++    };
++
++    if (bothColors)
++    {
++        applyGroups(WHITE);
++        applyGroups(BLACK);
++    }
++    else
++        applyGroups(color);
++}
++
+ template <bool DoCheck>
+ Variant* VariantParser<DoCheck>::parse() {
+     Variant* v = new Variant();
+@@ -347,6 +436,17 @@ Variant* VariantParser<DoCheck>::parse(Variant* v) {
+     parse_attribute<false>("castlingRookPiece", v->castlingRookPieces[BLACK], v->pieceToChar);
+     parse_attribute<false>("whiteDropRegion", v->dropRegion[WHITE]);
+     parse_attribute<false>("blackDropRegion", v->dropRegion[BLACK]);
++    parse_attribute("setupDrops", v->setupDrops);
++    parse_attribute("setupMustDrop", v->setupMustDrop);
++    parse_attribute("setupDropRegionWhite", v->setupDropRegion[WHITE]);
++    parse_attribute("setupDropRegionBlack", v->setupDropRegion[BLACK]);
++    parse_attribute("setupDropPieceTypes", v->setupDropPieceTypes[WHITE], v->pieceToChar);
++    parse_attribute("setupDropPieceTypes", v->setupDropPieceTypes[BLACK], v->pieceToChar);
++    parse_attribute("setupDropPieceTypesWhite", v->setupDropPieceTypes[WHITE], v->pieceToChar);
++    parse_attribute("setupDropPieceTypesBlack", v->setupDropPieceTypes[BLACK], v->pieceToChar);
++    parse_piece_choice_groups("pieceChoiceGroup", v, true);
++    parse_piece_choice_groups("pieceChoiceGroupWhite", v, false, WHITE);
++    parse_piece_choice_groups("pieceChoiceGroupBlack", v, false, BLACK);
+ 
+     bool dropOnTop = false;
+     parse_attribute<false>("dropOnTop", dropOnTop);
+diff --git a/src/parser.h b/src/parser.h
+index 04610b2f..2edbdbbb 100644
+--- a/src/parser.h
++++ b/src/parser.h
+@@ -52,8 +52,9 @@ private:
+     Config config;
+     template <bool Current = true, class T> bool parse_attribute(const std::string& key, T& target);
+     template <bool Current = true, class T> bool parse_attribute(const std::string& key, T& target, std::string pieceToChar);
++    void parse_piece_choice_groups(const std::string& key, Variant* v, bool bothColors = false, Color color = WHITE);
+ };
+ 
+ } // namespace Stockfish
+ 
+-#endif // #ifndef PARSER_H_INCLUDED
+\ No newline at end of file
++#endif // #ifndef PARSER_H_INCLUDED
+diff --git a/src/position.cpp b/src/position.cpp
+index f2b82a94..6c7bf3de 100644
+--- a/src/position.cpp
++++ b/src/position.cpp
+@@ -537,6 +537,9 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
+   chess960 = isChess960 || v->chess960;
+   tsumeMode = Options["TsumeMode"];
+   thisThread = th;
++  if (var->setupDrops)
++      for (Color c : {WHITE, BLACK})
++          st->setupDropsActive[c] = setup_drop_pending(c);
+   set_state(st);
+ 
+   assert(pos_is_ok());
+@@ -544,6 +547,89 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
+   return *this;
+ }
+ 
++bool Position::setup_drop_pending(Color c) const {
++  if (!var->setupDrops)
++      return false;
++
++  for (PieceSet ps = var->setupDropPieceTypes[c]; ps;)
++  {
++      PieceType pt = pop_lsb(ps);
++      if (count_in_hand(c, pt) > 0)
++          return true;
++  }
++
++  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
++  {
++      const PieceChoiceGroup& group = var->pieceChoiceGroups[c][i];
++      if (!group.requiredForSetup || st->choiceGroupUsage[c][i] >= group.limit)
++          continue;
++      for (PieceSet options = group.options; options;)
++      {
++          PieceType pt = pop_lsb(options);
++          if (count_in_hand(c, pt) > 0)
++              return true;
++      }
++  }
++
++  return false;
++}
++
++bool Position::refresh_setup_state(Color c) {
++  if (!var->setupDrops)
++      return false;
++  bool wasActive = st->setupDropsActive[c];
++  bool nowActive = setup_drop_pending(c);
++  st->setupDropsActive[c] = nowActive;
++  return wasActive && !nowActive;
++}
++
++void Position::update_choice_group_usage(Color c, PieceType pt) {
++  if (!var->pieceChoiceGroupCount[c])
++      return;
++  PieceSet mask = piece_set(pt);
++  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
++  {
++      if (!(var->pieceChoiceGroups[c][i].options & mask))
++          continue;
++      int limit = var->pieceChoiceGroups[c][i].limit;
++      int& usage = st->choiceGroupUsage[c][i];
++      usage += 1;
++      if (limit && usage > limit)
++          usage = limit;
++  }
++}
++
++void Position::discard_choice_group_reserve(Color c, Key& keyUpdater, DirtyPiece* dp) {
++  if (!var->pieceChoiceGroupCount[c])
++      return;
++  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
++  {
++      const PieceChoiceGroup& group = var->pieceChoiceGroups[c][i];
++      if (!group.requiredForSetup || st->choiceGroupUsage[c][i] < group.limit)
++          continue;
++      for (PieceSet options = group.options; options;)
++      {
++          PieceType pt = pop_lsb(options);
++          while (pieceCountInHand[c][pt] > 0)
++          {
++              Piece pc = make_piece(c, pt);
++              keyUpdater ^= Zobrist::inHand[pc][pieceCountInHand[c][pt]];
++              keyUpdater ^= Zobrist::inHand[pc][pieceCountInHand[c][pt] - 1];
++              remove_from_hand(pc);
++              if (dp)
++              {
++                  dp->piece[dp->dirty_num] = NO_PIECE;
++                  dp->handPiece[dp->dirty_num] = pc;
++                  dp->handCount[dp->dirty_num] = pieceCountInHand[c][pt];
++                  dp->from[dp->dirty_num] = SQ_NONE;
++                  dp->to[dp->dirty_num] = SQ_NONE;
++                  ++dp->dirty_num;
++              }
++          }
++      }
++  }
++}
++
+ 
+ /// Position::set_castling_right() is a helper function used to set castling
+ /// rights given the corresponding color and the rook starting square.
+@@ -1062,11 +1148,21 @@ bool Position::legal(Move m) const {
+       return false;
+ 
+   // Illegal non-drop moves
+-  if (must_drop() && count_in_hand(us, var->mustDropType) > 0)
++  bool enforceDrop = false;
++  PieceType requiredDropType = var->mustDropType;
++  if (var->mustDrop && count_in_hand(us, var->mustDropType) > 0)
++      enforceDrop = true;
++  if (setup_drops_active(us) && var->setupMustDrop)
++  {
++      enforceDrop = true;
++      requiredDropType = ALL_PIECES;
++  }
++
++  if (enforceDrop)
+   {
+       if (type_of(m) == DROP)
+       {
+-          if (var->mustDropType != ALL_PIECES && var->mustDropType != in_hand_piece_type(m))
++          if (requiredDropType != ALL_PIECES && requiredDropType != in_hand_piece_type(m))
+               return false;
+       }
+       else if (checkers())
+@@ -1765,10 +1861,14 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+           dp.to[0] = to;
+       }
+ 
+-      drop_piece(make_piece(us, in_hand_piece_type(m)), pc, to);
++      PieceType dropType = in_hand_piece_type(m);
++      drop_piece(make_piece(us, dropType), pc, to);
+       st->materialKey ^= Zobrist::psq[pc][pieceCount[pc]-1];
+       if (type_of(pc) != PAWN)
+           st->nonPawnMaterial[us] += PieceValue[MG][pc];
++      update_choice_group_usage(us, dropType);
++      if (refresh_setup_state(us))
++          discard_choice_group_reserve(us, k, Eval::useNNUE ? &dp : nullptr);
+       // Set castling rights for dropped king or rook
+       if (castling_dropped_piece() && rank_of(to) == castling_rank(us))
+       {
+diff --git a/src/position.h b/src/position.h
+index 45517d2c..9dc8c67d 100644
+--- a/src/position.h
++++ b/src/position.h
+@@ -56,6 +56,8 @@ struct StateInfo {
+   Square castlingKingSquare[COLOR_NB];
+   Bitboard wallSquares;
+   Bitboard gatesBB[COLOR_NB];
++  bool setupDropsActive[COLOR_NB];
++  int choiceGroupUsage[COLOR_NB][PieceChoiceGroupMax];
+ 
+   // Not copied when making a move (will be recomputed anyhow)
+   Key        key;
+@@ -173,6 +175,7 @@ public:
+   bool drop_loop() const;
+   bool captures_to_hand() const;
+   bool first_rank_pawn_drops() const;
++  bool setup_drops_active(Color c) const;
+   bool can_drop(Color c, PieceType pt) const;
+   EnclosingRule enclosing_drop() const;
+   Bitboard drop_region(Color c) const;
+@@ -360,6 +363,11 @@ private:
+   void move_piece(Square from, Square to);
+   template<bool Do>
+   void do_castling(Color us, Square from, Square& to, Square& rfrom, Square& rto);
++  bool setup_drop_pending(Color c) const;
++  bool refresh_setup_state(Color c);
++  void update_choice_group_usage(Color c, PieceType pt);
++  void discard_choice_group_reserve(Color c, Key& keyUpdater, DirtyPiece* dp);
++  bool choice_group_allows_drop(Color c, PieceType pt) const;
+ 
+   // Data members
+   Piece board[SQUARE_NB];
+@@ -670,6 +678,8 @@ inline bool Position::has_capture() const {
+ 
+ inline bool Position::must_drop() const {
+   assert(var != nullptr);
++  if (setup_drops_active(sideToMove) && var->setupMustDrop)
++      return true;
+   return var->mustDrop;
+ }
+ 
+@@ -693,6 +703,11 @@ inline bool Position::first_rank_pawn_drops() const {
+   return var->firstRankPawnDrops;
+ }
+ 
++inline bool Position::setup_drops_active(Color c) const {
++  assert(var != nullptr);
++  return var->setupDrops && st->setupDropsActive[c];
++}
++
+ inline EnclosingRule Position::enclosing_drop() const {
+   assert(var != nullptr);
+   return var->enclosingDrop;
+@@ -700,7 +715,7 @@ inline EnclosingRule Position::enclosing_drop() const {
+ 
+ inline Bitboard Position::drop_region(Color c) const {
+   assert(var != nullptr);
+-  return var->dropRegion[c];
++  return setup_drops_active(c) ? var->setupDropRegion[c] : var->dropRegion[c];
+ }
+ 
+ inline Bitboard Position::drop_region(Color c, PieceType pt) const {
+@@ -1649,7 +1664,22 @@ inline void Position::undrop_piece(Piece pc_hand, Square s) {
+ }
+ 
+ inline bool Position::can_drop(Color c, PieceType pt) const {
+-  return variant()->freeDrops || count_in_hand(c, pt) > 0;
++  return variant()->freeDrops || (choice_group_allows_drop(c, pt) && count_in_hand(c, pt) > 0);
++}
++
++inline bool Position::choice_group_allows_drop(Color c, PieceType pt) const {
++  assert(var != nullptr);
++  if (!var->pieceChoiceGroupCount[c])
++      return true;
++  PieceSet mask = piece_set(pt);
++  for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
++      if (var->pieceChoiceGroups[c][i].options & mask)
++      {
++          bool restrict = !(var->pieceChoiceGroups[c][i].requiredForSetup && !setup_drops_active(c));
++          if (restrict && st->choiceGroupUsage[c][i] >= var->pieceChoiceGroups[c][i].limit)
++              return false;
++      }
++  return true;
+ }
+ 
+ } // namespace Stockfish
+diff --git a/src/variant.cpp b/src/variant.cpp
+index ad97b97c..c5786c2a 100644
+--- a/src/variant.cpp
++++ b/src/variant.cpp
+@@ -1228,6 +1228,35 @@ namespace {
+         v->flyingGeneral = true;
+         return v;
+     }
++
++    // 66 Shogi (Roku-roku Shogi)
++    // minishogi variant with staged placement and rook/bishop choice
++    // http://www.tendocci.com/66shogi/
++    // http://minerva.cs.uec.ac.jp/cgi-bin/uec55shogi/wiki.cgi?page=%A3%B6%A3%B6%BE%AD%B4%FD
++    Variant* rokuroku_shogi_variant() {
++        Variant* v = minishogi_variant_base()->init();
++        v->maxRank = RANK_6;
++        v->maxFile = FILE_F;
++        v->pocketSize = 7;
++        v->add_piece(LANCE, 'l');
++        v->add_piece(SHOGI_KNIGHT, 'n');
++        v->startFen = "6/pppppp/6/6/PPPPPP/6[KGSNLRBkgsnlrb] w - - 0 1";
++        v->promotionRegion[WHITE] = Rank5BB | Rank6BB;
++        v->promotionRegion[BLACK] = Rank1BB | Rank2BB;
++        v->setupDrops = true;
++        v->setupMustDrop = true;
++        v->setupDropRegion[WHITE] = Rank1BB;
++        v->setupDropRegion[BLACK] = Rank6BB;
++        v->setupDropPieceTypes[WHITE] = piece_set(KING) | GOLD | SILVER | SHOGI_KNIGHT | LANCE;
++        v->setupDropPieceTypes[BLACK] = piece_set(KING) | GOLD | SILVER | SHOGI_KNIGHT | LANCE;
++        v->pieceChoiceGroupCount[WHITE] = 1;
++        v->pieceChoiceGroupCount[BLACK] = 1;
++        v->pieceChoiceGroups[WHITE][0] = {piece_set(ROOK) | BISHOP, 1, true};
++        v->pieceChoiceGroups[BLACK][0] = {piece_set(ROOK) | BISHOP, 1, true};
++        v->nnueAlias = "66shogi";
++        return v;
++    }
++
+ #ifdef LARGEBOARDS
+     // Shogi (Japanese chess)
+     // https://en.wikipedia.org/wiki/Shogi
+@@ -1244,6 +1273,7 @@ namespace {
+         v->promotedPieceType[SHOGI_KNIGHT] = GOLD;
+         return v;
+     }
++
+     // Check-Shogi
+     // Shogi variant with check counting enabled
+     Variant* checkshogi_variant() {
+@@ -1899,6 +1929,7 @@ void VariantMap::init() {
+     add("judkins", judkinsshogi_variant());
+     add("torishogi", torishogi_variant());
+     add("euroshogi", euroshogi_variant());
++    // add("66shogi", rokuroku_shogi_variant());
+     add("losalamos", losalamos_variant());
+     add("gardner", gardner_variant());
+     add("almost", almost_variant());
+diff --git a/src/variant.h b/src/variant.h
+index 0e6d44c3..b8a267a7 100644
+--- a/src/variant.h
++++ b/src/variant.h
+@@ -33,6 +33,14 @@
+ 
+ namespace Stockfish {
+ 
++constexpr int PieceChoiceGroupMax = 8;
++
++struct PieceChoiceGroup {
++  PieceSet options = NO_PIECE_SET;
++  int limit = 0;
++  bool requiredForSetup = false;
++};
++
+ /// Variant struct stores information needed to determine the rules of a variant.
+ 
+ struct Variant {
+@@ -104,6 +112,12 @@ struct Variant {
+   PieceType dropNoDoubled = NO_PIECE_TYPE;
+   int dropNoDoubledCount = 1;
+   bool immobilityIllegal = false;
++  bool setupDrops = false;
++  bool setupMustDrop = false;
++  Bitboard setupDropRegion[COLOR_NB] = {AllSquares, AllSquares};
++  PieceSet setupDropPieceTypes[COLOR_NB] = {NO_PIECE_SET, NO_PIECE_SET};
++  PieceChoiceGroup pieceChoiceGroups[COLOR_NB][PieceChoiceGroupMax];
++  int pieceChoiceGroupCount[COLOR_NB] = {};
+   bool gating = false;
+   WallingRule wallingRule = NO_WALLING;
+   Bitboard wallingRegion[COLOR_NB] = {AllSquares, AllSquares};
+@@ -222,6 +236,16 @@ struct Variant {
+   Variant* init() {
+       nnueAlias = "";
+       endgameEval = EG_EVAL_CHESS;
++      setupDrops = false;
++      setupMustDrop = false;
++      for (Color c : {WHITE, BLACK})
++      {
++          setupDropRegion[c] = AllSquares;
++          setupDropPieceTypes[c] = NO_PIECE_SET;
++          pieceChoiceGroupCount[c] = 0;
++          for (int i = 0; i < PieceChoiceGroupMax; ++i)
++              pieceChoiceGroups[c][i] = PieceChoiceGroup();
++      }
+       return this;
+   }
+ 
+diff --git a/variants.ini b/variants.ini
+new file mode 100644
+index 00000000..b006f824
+--- /dev/null
++++ b/variants.ini
+@@ -0,0 +1,18 @@
++# 66 Shogi (Roku-roku Shogi)
++# minishogi variant with the placement phase on the 6x6 board
++# where each side chooses either a rook or bishop to deploy.
++# http://www.tendocci.com/66shogi/
++# http://minerva.cs.uec.ac.jp/cgi-bin/uec55shogi/wiki.cgi?page=%A3%B6%A3%B6%BE%AD%B4%FD
++[66shogi:shogi]
++maxRank = 6
++maxFile = f
++pocketSize = 7
++startFen = 6/pppppp/6/6/PPPPPP/6[KGSNLRBkgsnlrb] w - - 0 1
++setupDrops = true
++setupMustDrop = true
++setupDropRegionWhite = *1
++setupDropRegionBlack = *6
++setupDropPieceTypes = kgsnl
++promotionRegionWhite = *5 *6
++promotionRegionBlack = *2 *1
++pieceChoiceGroup = options=rb limit=1 required=true
+\ No newline at end of file
