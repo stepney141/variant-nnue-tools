@@ -39,6 +39,7 @@ struct PieceChoiceGroup {
   PieceSet options = NO_PIECE_SET;
   int limit = 0;
   bool requiredForSetup = false;
+  bool lockUnusedOptions = false;
 };
 
 /// Variant struct stores information needed to determine the rules of a variant.

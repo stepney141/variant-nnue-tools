@@ -288,6 +288,8 @@ void VariantParser<DoCheck>::parse_piece_choice_groups(const std::string& key, V
             }
             else if (option == "required" || option == "requiredForSetup")
                 group.requiredForSetup = (value == "true" || value == "1");
+            else if (option == "lockUnused" || option == "lockUnusedOptions" || option == "banUnused")
+                group.lockUnusedOptions = (value == "true" || value == "1");
         }
 
         if (group.options == NO_PIECE_SET || group.limit <= 0)

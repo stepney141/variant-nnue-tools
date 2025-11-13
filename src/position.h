@@ -61,6 +61,7 @@ struct StateInfo {
   Bitboard gatesBB[COLOR_NB];
   bool setupDropsActive[COLOR_NB];
   int choiceGroupUsage[COLOR_NB][PieceChoiceGroupMax];
+  PieceSet choiceGroupUsedTypes[COLOR_NB][PieceChoiceGroupMax];
 
   // Not copied when making a move (will be recomputed anyhow)
   Key        key;
@@ -1700,9 +1701,19 @@ inline bool Position::choice_group_allows_drop(Color c, PieceType pt) const {
   for (int i = 0; i < var->pieceChoiceGroupCount[c]; ++i)
       if (var->pieceChoiceGroups[c][i].options & mask)
       {
-          bool restrict = !(var->pieceChoiceGroups[c][i].requiredForSetup && !setup_drops_active(c));
-          if (restrict && st->choiceGroupUsage[c][i] >= var->pieceChoiceGroups[c][i].limit)
+          const PieceChoiceGroup& group = var->pieceChoiceGroups[c][i];
+          int usage = st->choiceGroupUsage[c][i];
+          bool restrict = !(group.requiredForSetup && !setup_drops_active(c));
+          if (restrict && usage >= group.limit)
               return false;
+
+          if (group.lockUnusedOptions)
+          {
+              PieceSet used = st->choiceGroupUsedTypes[c][i];
+              bool alreadyUsed = used & mask;
+              if (!alreadyUsed && group.limit && usage >= group.limit)
+                  return false;
+          }
       }
   return true;
 }

@@ -1251,8 +1251,8 @@ namespace {
         v->setupDropPieceTypes[BLACK] = piece_set(KING) | GOLD | SILVER | SHOGI_KNIGHT | LANCE;
         v->pieceChoiceGroupCount[WHITE] = 1;
         v->pieceChoiceGroupCount[BLACK] = 1;
-        v->pieceChoiceGroups[WHITE][0] = {piece_set(ROOK) | BISHOP, 1, true};
-        v->pieceChoiceGroups[BLACK][0] = {piece_set(ROOK) | BISHOP, 1, true};
+        v->pieceChoiceGroups[WHITE][0] = {piece_set(ROOK) | BISHOP, 1, true, true};
+        v->pieceChoiceGroups[BLACK][0] = {piece_set(ROOK) | BISHOP, 1, true, true};
         v->nnueAlias = "66shogi";
         return v;
     }

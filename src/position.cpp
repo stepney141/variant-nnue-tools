@@ -597,6 +597,8 @@ void Position::update_choice_group_usage(Color c, PieceType pt) {
       if (!(var->pieceChoiceGroups[c][i].options & mask))
           continue;
       int limit = var->pieceChoiceGroups[c][i].limit;
+      PieceSet& used = st->choiceGroupUsedTypes[c][i];
+      used |= mask;
       int& usage = st->choiceGroupUsage[c][i];
       usage += 1;
       if (limit && usage > limit)
